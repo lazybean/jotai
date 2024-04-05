@@ -126,6 +126,48 @@ type Mounted = {
 
 type MountedAtoms = Set<AnyAtom>
 
+type BaseDevAction<
+  T extends string,
+  P extends Record<string, any> | undefined,
+  R,
+> = {
+  type: T
+  props: P
+  return: R
+}
+
+type DEV_GET_ATOM_STATE = BaseDevAction<
+  'get_atom_state',
+  { atom: AnyAtom },
+  | { readonly v: AnyValue; readonly d: Iterable<AnyAtom> }
+  | { readonly e: AnyError; readonly d: Iterable<AnyAtom> }
+  | undefined
+>
+
+type DEV_RESTORE_STATE = BaseDevAction<
+  'restore_atom_state',
+  { values: Iterable<readonly [AnyAtom, AnyValue]> },
+  undefined
+>
+
+type DEV_GET_MOUNTED_ATOMS = BaseDevAction<
+  'get_mounted_atoms',
+  undefined,
+  Iterable<AnyAtom>
+>
+
+type DEV_GET_MOUNTED_ATOM_STATE = BaseDevAction<
+  'get_mounted_atom_state',
+  { atom: AnyAtom },
+  Mounted | undefined
+>
+
+type DEV_SUBSCRIBE = BaseDevAction<
+  'subscribe',
+  { l: DevListenerRev3 },
+  () => void
+>
+
 // for debugging purpose only
 type DevListenerRev2 = (
   action:
@@ -146,14 +188,14 @@ type DevListenerRev3 = (
   action: { type: 'set'; atom: AnyAtom } | { type: 'unsub' },
 ) => void
 type DevStoreRev3 = {
-  dev3_subscribe_store: (l: DevListenerRev3) => () => void
-  dev3_get_mounted_atoms: () => Iterable<AnyAtom>
-  dev3_get_atom_state: (
-    a: AnyAtom,
-  ) => { readonly v: AnyValue } | { readonly e: AnyError } | undefined
-  // deps are atoms that specified atom depends on (not including self)
-  dev3_get_atom_deps: (a: AnyAtom) => Iterable<AnyAtom> | undefined
-  dev3_restore_atoms: (values: Iterable<readonly [AnyAtom, AnyValue]>) => void
+  dev_methods: (
+    payload:
+      | DEV_GET_ATOM_STATE
+      | DEV_RESTORE_STATE
+      | DEV_GET_MOUNTED_ATOMS
+      | DEV_GET_MOUNTED_ATOM_STATE
+      | DEV_SUBSCRIBE,
+  ) => (typeof payload)['return']
 }
 
 type PrdStore = {
@@ -848,53 +890,65 @@ export const createStore = (): Store => {
           l({ type: 'restore', flushed: flushed! }),
         )
       },
-      dev3_subscribe_store: (l) => {
-        const l2: DevListenerRev2 = (action) => {
-          if (action.type === 'unsub') {
-            l(action)
-          } else if (action.type !== 'sub' && 'flushed' in action) {
-            for (const a of action.flushed) {
-              l({ type: 'set', atom: a })
+      dev_methods: (payload) => {
+        if (payload.type === 'subscribe') {
+          const l = payload.props.l
+
+          const l2: DevListenerRev2 = (action) => {
+            if (action.type === 'unsub') {
+              l(action)
+            } else if (action.type !== 'sub' && 'flushed' in action) {
+              for (const a of action.flushed) {
+                l({ type: 'set', atom: a })
+              }
             }
           }
-        }
-        devListenersRev3.add(l2)
-        return () => {
-          devListenersRev3.delete(l2)
-        }
-      },
-      dev3_get_mounted_atoms: () => mountedAtoms.values(),
-      dev3_get_atom_state: (a) => {
-        const aState = atomStateMap.get(a)
-        if (aState && 'v' in aState) {
-          return { v: aState.v }
-        }
-        if (aState && 'e' in aState) {
-          return { e: aState.e }
-        }
-        return undefined
-      },
-      dev3_get_atom_deps: (a) => {
-        const aState = atomStateMap.get(a)
-        if (!aState) {
-          return undefined
-        }
-        const deps = new Set(aState.d.keys())
-        deps.delete(a)
-        return deps
-      },
-      dev3_restore_atoms: (values) => {
-        pendingStack.push(new Set())
-        for (const [atom, valueOrPromise] of values) {
-          if (hasInitialValue(atom)) {
-            setAtomValueOrPromise(atom, valueOrPromise)
-            recomputeDependents(atom)
+
+          devListenersRev3.add(l2)
+          return () => {
+            devListenersRev3.delete(l2)
           }
         }
-        const flushed = flushPending(pendingStack.pop()!)
-        devListenersRev3.forEach((l) =>
-          l({ type: 'restore', flushed: flushed! }),
-        )
+
+        if (payload.type === 'get_mounted_atoms') {
+          return mountedAtoms.values()
+        }
+
+        if (payload.type === 'get_atom_state') {
+          const aState = atomStateMap.get(payload.props.atom)
+
+          if (!aState) {
+            return undefined
+          }
+
+          const d = new Set(aState.d.keys())
+          d.delete(payload.props.atom)
+
+          if (aState && 'v' in aState) {
+            return { v: aState.v, d }
+          }
+          if (aState && 'e' in aState) {
+            return { e: aState.e, d }
+          }
+
+          return undefined
+        }
+
+        if (payload.type === 'restore_atom_state') {
+          pendingStack.push(new Set())
+
+          for (const [atom, valueOrPromise] of payload.props.values) {
+            if (hasInitialValue(atom)) {
+              setAtomValueOrPromise(atom, valueOrPromise)
+              recomputeDependents(atom)
+            }
+          }
+
+          const flushed = flushPending(pendingStack.pop()!)
+          devListenersRev3.forEach((l) =>
+            l({ type: 'restore', flushed: flushed! }),
+          )
+        }
       },
     }
   }
